@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test (Elixir 1.18 / OTP 27)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.18"
+          otp-version: "27"
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-1.18-27-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-1.18-27-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Verify version matches tag
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          mix_version="$(grep '@version "' mix.exs | sed 's/.*@version "//;s/"//')"
+          if [ "$tag" != "$mix_version" ]; then
+            echo "::error::Tag v$tag does not match mix.exs version $mix_version"
+            exit 1
+          fi
+
+      - name: Run tests
+        run: mix test
+
+  release:
+    name: Create Release & Publish to Hex
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.18"
+          otp-version: "27"
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-1.18-27-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-1.18-27-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Create GitHub Release
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build docs
+        run: mix docs
+
+      - name: Publish to Hex
+        run: mix hex.publish --yes
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
