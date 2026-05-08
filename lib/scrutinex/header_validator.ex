@@ -3,6 +3,7 @@ defmodule Scrutinex.HeaderValidator do
 
   alias Scrutinex.{Column, Error}
 
+  @doc false
   @spec validate(list(String.t()), Scrutinex.Schema.Definition.t()) :: :ok | {:error, [Error.t()]}
   def validate(headers, schema) do
     errors =

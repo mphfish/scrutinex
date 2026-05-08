@@ -23,6 +23,11 @@ defmodule Scrutinex.Validator do
     col_names_set = MapSet.new(resolved_columns, & &1.name)
     required_col_names = for col <- resolved_columns, col.required, do: col.name
 
+    declared_string_names = for col <- schema.columns, is_binary(col.name), do: col.name
+
+    suggestion_map =
+      build_suggestion_map(data, schema.strict, declared_string_names, col_names_set)
+
     {coerced_rows, errors, _error_count} =
       data
       |> Enum.with_index()
@@ -34,7 +39,8 @@ defmodule Scrutinex.Validator do
             resolved_columns,
             schema,
             col_names_set,
-            required_col_names
+            required_col_names,
+            suggestion_map
           )
 
         new_count = err_count + length(row_errors)
@@ -62,8 +68,16 @@ defmodule Scrutinex.Validator do
     }
   end
 
-  defp safe_validate_row(row, row_idx, columns, schema, col_names_set, required_col_names) do
-    validate_row(row, row_idx, columns, schema, col_names_set, required_col_names)
+  defp safe_validate_row(
+         row,
+         row_idx,
+         columns,
+         schema,
+         col_names_set,
+         required_col_names,
+         suggestion_map
+       ) do
+    validate_row(row, row_idx, columns, schema, col_names_set, required_col_names, suggestion_map)
   rescue
     e ->
       error = %Error{
@@ -88,7 +102,7 @@ defmodule Scrutinex.Validator do
           row |> Map.keys() |> Enum.reduce(acc, &MapSet.put(&2, &1))
         end)
 
-      Enum.flat_map(columns, fn col ->
+      Enum.flat_map(columns, fn %Column{} = col ->
         case col.name do
           %Regex{} = regex ->
             all_keys
@@ -125,12 +139,20 @@ defmodule Scrutinex.Validator do
     end)
   end
 
-  defp validate_row(row, row_idx, columns, schema, col_names_set, required_col_names) do
+  defp validate_row(
+         row,
+         row_idx,
+         columns,
+         schema,
+         col_names_set,
+         required_col_names,
+         suggestion_map
+       ) do
     presence_errors = check_presence(row, row_idx, required_col_names)
 
     strict_errors =
       if schema.strict do
-        check_strict(row, row_idx, col_names_set)
+        check_strict(row, row_idx, col_names_set, suggestion_map)
       else
         []
       end
@@ -160,19 +182,57 @@ defmodule Scrutinex.Validator do
     end
   end
 
-  defp check_strict(row, row_idx, declared_set) do
+  defp check_strict(row, row_idx, declared_set, suggestion_map) do
     for key <- Map.keys(row), not MapSet.member?(declared_set, key) do
-      %Error{
-        row: row_idx,
-        column: key,
-        check: :unexpected_column,
-        message: "unexpected column",
-        metadata: %{column: key},
-        value: nil,
-        severity: :error
-      }
+      suggestion = Map.get(suggestion_map, key)
+      unexpected_column_error(row_idx, key, suggestion)
     end
   end
+
+  defp unexpected_column_error(row_idx, key, nil) do
+    %Error{
+      row: row_idx,
+      column: key,
+      check: :unexpected_column,
+      message: "unexpected column",
+      metadata: %{column: key},
+      value: nil,
+      severity: :error
+    }
+  end
+
+  defp unexpected_column_error(row_idx, key, suggestion) do
+    %Error{
+      row: row_idx,
+      column: key,
+      check: :unexpected_column,
+      message: "unexpected column — did you mean '%{suggestion}'?",
+      metadata: %{column: key, suggestion: suggestion},
+      value: nil,
+      severity: :error
+    }
+  end
+
+  @suggestion_threshold 0.8
+
+  defp build_suggestion_map(data, true, declared_string_names, col_names_set)
+       when declared_string_names != [] do
+    all_data_keys = data |> Enum.flat_map(&Map.keys/1) |> Enum.uniq()
+
+    all_data_keys
+    |> Enum.reject(&MapSet.member?(col_names_set, &1))
+    |> Map.new(fn key ->
+      {best_name, best_score} =
+        declared_string_names
+        |> Enum.map(fn name -> {name, String.jaro_distance(key, name)} end)
+        |> Enum.max_by(&elem(&1, 1))
+
+      suggestion = if best_score >= @suggestion_threshold, do: best_name, else: nil
+      {key, suggestion}
+    end)
+  end
+
+  defp build_suggestion_map(_data, _strict, _declared_string_names, _col_names_set), do: %{}
 
   # raw_value is the original value from the row, used by the :skip branch.
   # In the with/else, :skip is returned by check_empty (before maybe_coerce
