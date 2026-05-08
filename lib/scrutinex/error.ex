@@ -14,7 +14,7 @@ defmodule Scrutinex.Error do
   """
 
   @type t :: %__MODULE__{
-          row: non_neg_integer(),
+          row: non_neg_integer() | nil,
           column: String.t() | nil,
           check: atom(),
           message: String.t(),

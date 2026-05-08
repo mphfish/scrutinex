@@ -52,7 +52,8 @@ defmodule Scrutinex.Validator do
 
     cross_errors = run_all_cross_checks(coerced_rows, schema.checks)
 
-    all_errors = errors ++ cross_errors
+    regex_errors = check_required_regex(schema.columns, resolved_columns)
+    all_errors = regex_errors ++ errors ++ cross_errors
 
     %Result{
       valid?: not Enum.any?(all_errors, &(&1.severity == :error)),
@@ -101,6 +102,27 @@ defmodule Scrutinex.Validator do
     else
       columns
     end
+  end
+
+  defp check_required_regex(schema_columns, resolved_columns) do
+    schema_columns
+    |> Enum.filter(fn col -> match?(%Regex{}, col.name) and col.required end)
+    |> Enum.reject(fn col ->
+      Enum.any?(resolved_columns, fn rc -> Regex.match?(col.name, rc.name) end)
+    end)
+    |> Enum.map(fn col ->
+      source = Regex.source(col.name)
+
+      %Error{
+        row: nil,
+        column: source,
+        check: :required_columns,
+        message: "no columns matched pattern '%{pattern}'",
+        metadata: %{pattern: source},
+        value: nil,
+        severity: :error
+      }
+    end)
   end
 
   defp validate_row(row, row_idx, columns, schema, col_names_set, required_col_names) do

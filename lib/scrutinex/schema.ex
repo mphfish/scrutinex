@@ -75,6 +75,12 @@ defmodule Scrutinex.Schema do
     raw_checks = Keyword.get(opts, :checks, [])
     column_severity = Keyword.get(opts, :severity, :error)
 
+    default_required =
+      case name do
+        {:sigil_r, _, _} -> false
+        _ -> true
+      end
+
     # Extract per-check severity overrides at compile time.
     # A check entry like `format: {~r/@/, severity: :warning}` is a 2-tuple
     # where the second element is a keyword list containing :severity.
@@ -108,7 +114,7 @@ defmodule Scrutinex.Schema do
       @scrutinex_columns %Column{
         name: unquote(name),
         type: unquote(type),
-        required: unquote(Keyword.get(opts, :required, true)),
+        required: unquote(Keyword.get(opts, :required, default_required)),
         coerce: unquote(Keyword.get(opts, :coerce, false)),
         nullable: unquote(Keyword.get(opts, :nullable, false)),
         checks: unquote(stripped_checks),
