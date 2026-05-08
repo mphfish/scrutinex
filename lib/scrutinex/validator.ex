@@ -175,12 +175,12 @@ defmodule Scrutinex.Validator do
   end
 
   # raw_value is the original value from the row, used by the :skip branch.
-  # In the with/else, :skip is returned by check_null (before maybe_coerce
+  # In the with/else, :skip is returned by check_empty (before maybe_coerce
   # rebinds value), so the else clause correctly sees the original value.
   defp validate_cell(row, col, row_idx, errors) do
     raw_value = Map.get(row, col.name)
 
-    with :ok <- check_null(raw_value, col, row_idx),
+    with :ok <- check_empty(raw_value, col, row_idx),
          {:ok, value} <- maybe_coerce(raw_value, col, row_idx),
          :ok <- maybe_type_check(value, col, row_idx),
          :ok <- run_checks(value, col, row_idx) do
@@ -192,6 +192,9 @@ defmodule Scrutinex.Validator do
     else
       :skip ->
         {errors, row}
+
+      {:warn, warning_error} ->
+        {[warning_error | errors], Map.put(row, col.name, nil)}
 
       {:error, error, coerced_value} ->
         if coerced_value === raw_value do
@@ -226,24 +229,39 @@ defmodule Scrutinex.Validator do
     end
   end
 
-  defp check_null(value, col, row_idx) do
+  defp check_empty(value, col, row_idx) do
     is_empty = is_nil(value) or value == ""
 
     if is_empty do
-      if col.nullable do
-        :skip
-      else
-        error = %Error{
-          row: row_idx,
-          column: col.name,
-          check: :not_null,
-          message: "must not be empty",
-          metadata: %{column: col.name},
-          value: value,
-          severity: col.severity
-        }
+      case col.on_empty do
+        :ignore ->
+          :skip
 
-        {:error, error, value}
+        :error ->
+          error = %Error{
+            row: row_idx,
+            column: col.name,
+            check: :not_null,
+            message: "must not be empty",
+            metadata: %{column: col.name},
+            value: value,
+            severity: col.severity
+          }
+
+          {:error, error, value}
+
+        :warn ->
+          error = %Error{
+            row: row_idx,
+            column: col.name,
+            check: :empty_value,
+            message: "value is empty",
+            metadata: %{column: col.name},
+            value: value,
+            severity: :warning
+          }
+
+          {:warn, error}
       end
     else
       :ok

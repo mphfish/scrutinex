@@ -8,7 +8,10 @@ defmodule Scrutinex.Column do
     * `:type` - expected data type (`:string`, `:integer`, `:float`, `:boolean`, `:date`, `:datetime`)
     * `:required` - when `true` (default), the column must be present in every row
     * `:coerce` - when `true`, attempts to cast the value to `:type` before validation
-    * `:nullable` - when `true`, allows `nil` and empty-string values
+    * `:on_empty` - controls behaviour when a cell value is `nil` or `""`:
+      - `:error` (default) — produces a severity `:error` and skips remaining checks
+      - `:warn` — produces a severity `:warning` and skips remaining checks
+      - `:ignore` — produces no error and skips remaining checks
     * `:checks` - keyword list of check tuples, e.g. `[number: [greater_than: 0]]`
   """
 
@@ -17,7 +20,7 @@ defmodule Scrutinex.Column do
           type: :string | :integer | :float | :boolean | :date | :datetime,
           required: boolean(),
           coerce: boolean(),
-          nullable: boolean(),
+          on_empty: :error | :warn | :ignore,
           checks: keyword(),
           severity: :error | :warning,
           check_severities: map()
@@ -29,7 +32,7 @@ defmodule Scrutinex.Column do
     :type,
     required: true,
     coerce: false,
-    nullable: false,
+    on_empty: :error,
     checks: [],
     severity: :error,
     check_severities: %{}

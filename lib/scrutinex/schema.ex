@@ -14,7 +14,11 @@ defmodule Scrutinex.Schema do
 
     * `:required` - fail if the column key is missing (default `true`)
     * `:coerce` - attempt type casting before validation (default `false`)
-    * `:nullable` - allow `nil` / empty values (default `false`)
+    * `:on_empty` - behaviour when a cell is `nil` or `""` (default `:error`):
+      - `:error` — severity `:error`, skips remaining checks
+      - `:warn` — severity `:warning`, skips remaining checks, cell becomes `nil` in result data
+      - `:ignore` — no error, skips remaining checks
+    * `:nullable` - accepted as compile-time sugar for `on_empty: :ignore`; cannot be combined with `:on_empty`
     * `:checks` - keyword list of built-in checks:
       - `number: [greater_than: 0, less_than: 100]`
       - `inclusion: ["A", "B", "C"]`
@@ -47,7 +51,7 @@ defmodule Scrutinex.Schema do
         column "name",  :string,  checks: [length: [min: 1, max: 100]]
         column "age",   :integer, coerce: true, checks: [number: [greater_than: 0]]
         column "email", :string,  checks: [format: ~r/@/]
-        column ~r/^score_/, :float, required: false, nullable: true
+        column ~r/^score_/, :float, required: false, on_empty: :ignore
 
         check :age_name_consistency do
           fn row -> !(row["age"] > 150 && row["name"] == "") end
@@ -79,6 +83,28 @@ defmodule Scrutinex.Schema do
       case name do
         {:sigil_r, _, _} -> false
         _ -> true
+      end
+
+    nullable_opt = Keyword.get(opts, :nullable)
+    on_empty_opt = Keyword.get(opts, :on_empty)
+
+    on_empty =
+      case {nullable_opt, on_empty_opt} do
+        {nil, nil} ->
+          :error
+
+        {nil, val} ->
+          val
+
+        {true, nil} ->
+          :ignore
+
+        {false, nil} ->
+          :error
+
+        {_, _} ->
+          raise CompileError,
+            description: "cannot set both :nullable and :on_empty on column #{inspect(name)}"
       end
 
     # Extract per-check severity overrides at compile time.
@@ -116,7 +142,7 @@ defmodule Scrutinex.Schema do
         type: unquote(type),
         required: unquote(Keyword.get(opts, :required, default_required)),
         coerce: unquote(Keyword.get(opts, :coerce, false)),
-        nullable: unquote(Keyword.get(opts, :nullable, false)),
+        on_empty: unquote(on_empty),
         checks: unquote(stripped_checks),
         severity: unquote(column_severity),
         check_severities: unquote(Macro.escape(check_severities))
@@ -142,12 +168,19 @@ defmodule Scrutinex.Schema do
     checks_raw = Module.get_attribute(env.module, :scrutinex_checks) |> Enum.reverse()
     strict = Module.get_attribute(env.module, :scrutinex_strict)
 
-    for %Column{type: type, name: name, checks: checks} <- columns do
+    for %Column{type: type, name: name, checks: checks, on_empty: on_empty} <- columns do
       unless type in @valid_types do
         raise CompileError,
           description:
             "invalid column type #{inspect(type)} for column #{inspect(name)}. " <>
               "Must be one of: #{inspect(@valid_types)}"
+      end
+
+      unless on_empty in [:error, :warn, :ignore] do
+        raise CompileError,
+          description:
+            "invalid on_empty value #{inspect(on_empty)} for column #{inspect(name)}. " <>
+              "Must be one of: [:error, :warn, :ignore]"
       end
 
       for {check_name, _} <- checks do
