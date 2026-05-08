@@ -27,7 +27,7 @@ defmodule Scrutinex do
   check options.
   """
 
-  alias Scrutinex.{Result, Validator}
+  alias Scrutinex.{HeaderValidator, Result, Validator}
 
   @doc """
   Validates a list of row maps against the given schema module.
@@ -105,9 +105,61 @@ defmodule Scrutinex do
     if result.valid? do
       result.data
     else
+      error_count = Enum.count(result.errors, &(&1.severity == :error))
+
       raise Scrutinex.ValidationError,
-        message: "validation failed with #{length(result.errors)} error(s)",
+        message: "validation failed with #{error_count} error(s)",
         result: result
+    end
+  end
+
+  @doc """
+  Validates a list of raw header strings against the given schema module.
+
+  Checks for duplicate headers, missing required columns, and (in strict mode)
+  unexpected columns. All errors have `row: nil` since they are schema-level.
+
+  Returns `:ok` when the headers satisfy all structural requirements, or
+  `{:error, errors}` with a list of `Scrutinex.Error` structs.
+  """
+  @spec validate_headers(list(String.t()), module()) :: :ok | {:error, [Scrutinex.Error.t()]}
+  def validate_headers(headers, schema_module) do
+    unless is_list(headers) do
+      raise ArgumentError,
+            "expected a list of header strings as first argument, got: #{inspect(headers)}"
+    end
+
+    unless is_atom(schema_module) do
+      raise ArgumentError,
+            "expected a schema module as second argument, got: #{inspect(schema_module)}"
+    end
+
+    unless function_exported?(schema_module, :__schema__, 0) do
+      raise ArgumentError,
+            "#{inspect(schema_module)} does not implement Scrutinex.Schema " <>
+              "(missing __schema__/0 function)"
+    end
+
+    schema = schema_module.__schema__()
+    HeaderValidator.validate(headers, schema)
+  end
+
+  @doc """
+  Like `validate_headers/2`, but raises `Scrutinex.ValidationError` on failure.
+
+  On success, returns `:ok`. On failure, the raised `ValidationError` contains
+  the errors in its `:result` field with `valid?: false`.
+  """
+  @spec validate_headers!(list(String.t()), module()) :: :ok
+  def validate_headers!(headers, schema_module) do
+    case validate_headers(headers, schema_module) do
+      :ok ->
+        :ok
+
+      {:error, errors} ->
+        raise Scrutinex.ValidationError,
+          message: "header validation failed with #{length(errors)} error(s)",
+          result: %Result{valid?: false, data: [], errors: errors}
     end
   end
 end

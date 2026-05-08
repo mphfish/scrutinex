@@ -14,7 +14,11 @@ defmodule Scrutinex.Schema do
 
     * `:required` - fail if the column key is missing (default `true`)
     * `:coerce` - attempt type casting before validation (default `false`)
-    * `:nullable` - allow `nil` / empty values (default `false`)
+    * `:on_empty` - behaviour when a cell is `nil` or `""` (default `:error`):
+      - `:error` — severity `:error`, skips remaining checks
+      - `:warn` — severity `:warning`, skips remaining checks, cell becomes `nil` in result data
+      - `:ignore` — no error, skips remaining checks
+    * `:nullable` - accepted as compile-time sugar for `on_empty: :ignore`; cannot be combined with `:on_empty`
     * `:checks` - keyword list of built-in checks:
       - `number: [greater_than: 0, less_than: 100]`
       - `inclusion: ["A", "B", "C"]`
@@ -47,7 +51,7 @@ defmodule Scrutinex.Schema do
         column "name",  :string,  checks: [length: [min: 1, max: 100]]
         column "age",   :integer, coerce: true, checks: [number: [greater_than: 0]]
         column "email", :string,  checks: [format: ~r/@/]
-        column ~r/^score_/, :float, required: false, nullable: true
+        column ~r/^score_/, :float, required: false, on_empty: :ignore
 
         check :age_name_consistency do
           fn row -> !(row["age"] > 150 && row["name"] == "") end
@@ -72,23 +76,87 @@ defmodule Scrutinex.Schema do
   end
 
   defmacro column(name, type, opts \\ []) do
+    raw_checks = Keyword.get(opts, :checks, [])
+    column_severity = Keyword.get(opts, :severity, :error)
+
+    default_required =
+      case name do
+        {:sigil_r, _, _} -> false
+        _ -> true
+      end
+
+    nullable_opt = Keyword.get(opts, :nullable)
+    on_empty_opt = Keyword.get(opts, :on_empty)
+
+    on_empty =
+      case {nullable_opt, on_empty_opt} do
+        {nil, nil} ->
+          :error
+
+        {nil, val} ->
+          val
+
+        {true, nil} ->
+          :ignore
+
+        {false, nil} ->
+          :error
+
+        {_, _} ->
+          raise CompileError,
+            description: "cannot set both :nullable and :on_empty on column #{inspect(name)}"
+      end
+
+    # Extract per-check severity overrides at compile time.
+    # A check entry like `format: {~r/@/, severity: :warning}` is a 2-tuple
+    # where the second element is a keyword list containing :severity.
+    # We separate the severity from the check args and store them in check_severities.
+    {stripped_checks, check_severities} =
+      Enum.reduce(raw_checks, {[], %{}}, fn
+        {check_type, {actual_args, per_check_opts}}, {checks_acc, sev_acc}
+        when is_list(per_check_opts) ->
+          case Keyword.pop(per_check_opts, :severity) do
+            {nil, _} ->
+              {[{check_type, {actual_args, per_check_opts}} | checks_acc], sev_acc}
+
+            {sev, remaining_opts} ->
+              stripped_args =
+                if remaining_opts == [] do
+                  actual_args
+                else
+                  {actual_args, remaining_opts}
+                end
+
+              {[{check_type, stripped_args} | checks_acc], Map.put(sev_acc, check_type, sev)}
+          end
+
+        entry, {checks_acc, sev_acc} ->
+          {[entry | checks_acc], sev_acc}
+      end)
+
+    stripped_checks = Enum.reverse(stripped_checks)
+
     quote do
       @scrutinex_columns %Column{
         name: unquote(name),
         type: unquote(type),
-        required: unquote(Keyword.get(opts, :required, true)),
+        required: unquote(Keyword.get(opts, :required, default_required)),
         coerce: unquote(Keyword.get(opts, :coerce, false)),
-        nullable: unquote(Keyword.get(opts, :nullable, false)),
-        checks: unquote(Keyword.get(opts, :checks, []))
+        on_empty: unquote(on_empty),
+        checks: unquote(stripped_checks),
+        severity: unquote(column_severity),
+        check_severities: unquote(Macro.escape(check_severities))
       }
     end
   end
 
   defmacro check(name, opts \\ [], do: block) do
     message = Keyword.get(opts, :message, "check failed")
+    severity = Keyword.get(opts, :severity, :error)
 
     quote do
-      @scrutinex_checks {unquote(name), unquote(message), unquote(Macro.escape(block))}
+      @scrutinex_checks {unquote(name), unquote(message), unquote(severity),
+                         unquote(Macro.escape(block))}
     end
   end
 
@@ -100,12 +168,19 @@ defmodule Scrutinex.Schema do
     checks_raw = Module.get_attribute(env.module, :scrutinex_checks) |> Enum.reverse()
     strict = Module.get_attribute(env.module, :scrutinex_strict)
 
-    for %Column{type: type, name: name, checks: checks} <- columns do
+    for %Column{type: type, name: name, checks: checks, on_empty: on_empty} <- columns do
       unless type in @valid_types do
         raise CompileError,
           description:
             "invalid column type #{inspect(type)} for column #{inspect(name)}. " <>
               "Must be one of: #{inspect(@valid_types)}"
+      end
+
+      unless on_empty in [:error, :warn, :ignore] do
+        raise CompileError,
+          description:
+            "invalid on_empty value #{inspect(on_empty)} for column #{inspect(name)}. " <>
+              "Must be one of: [:error, :warn, :ignore]"
       end
 
       for {check_name, _} <- checks do
@@ -119,11 +194,12 @@ defmodule Scrutinex.Schema do
     end
 
     checks =
-      Enum.map(checks_raw, fn {name, message, func_ast} ->
+      Enum.map(checks_raw, fn {name, message, severity, func_ast} ->
         quote do
           %Check{
             name: unquote(name),
             message: unquote(message),
+            severity: unquote(severity),
             function: unquote(func_ast)
           }
         end

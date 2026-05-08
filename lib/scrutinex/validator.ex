@@ -23,6 +23,11 @@ defmodule Scrutinex.Validator do
     col_names_set = MapSet.new(resolved_columns, & &1.name)
     required_col_names = for col <- resolved_columns, col.required, do: col.name
 
+    declared_string_names = for col <- schema.columns, is_binary(col.name), do: col.name
+
+    suggestion_map =
+      build_suggestion_map(data, schema.strict, declared_string_names, col_names_set)
+
     {coerced_rows, errors, _error_count} =
       data
       |> Enum.with_index()
@@ -34,7 +39,8 @@ defmodule Scrutinex.Validator do
             resolved_columns,
             schema,
             col_names_set,
-            required_col_names
+            required_col_names,
+            suggestion_map
           )
 
         new_count = err_count + length(row_errors)
@@ -52,17 +58,26 @@ defmodule Scrutinex.Validator do
 
     cross_errors = run_all_cross_checks(coerced_rows, schema.checks)
 
-    all_errors = errors ++ cross_errors
+    regex_errors = check_required_regex(schema.columns, resolved_columns)
+    all_errors = regex_errors ++ errors ++ cross_errors
 
     %Result{
-      valid?: all_errors == [],
+      valid?: not Enum.any?(all_errors, &(&1.severity == :error)),
       data: coerced_rows,
       errors: all_errors
     }
   end
 
-  defp safe_validate_row(row, row_idx, columns, schema, col_names_set, required_col_names) do
-    validate_row(row, row_idx, columns, schema, col_names_set, required_col_names)
+  defp safe_validate_row(
+         row,
+         row_idx,
+         columns,
+         schema,
+         col_names_set,
+         required_col_names,
+         suggestion_map
+       ) do
+    validate_row(row, row_idx, columns, schema, col_names_set, required_col_names, suggestion_map)
   rescue
     e ->
       error = %Error{
@@ -71,7 +86,8 @@ defmodule Scrutinex.Validator do
         check: :internal_error,
         message: "row validation failed: #{Exception.message(e)}",
         metadata: %{kind: :exception},
-        value: nil
+        value: nil,
+        severity: :error
       }
 
       {[error], row}
@@ -86,12 +102,12 @@ defmodule Scrutinex.Validator do
           row |> Map.keys() |> Enum.reduce(acc, &MapSet.put(&2, &1))
         end)
 
-      Enum.flat_map(columns, fn col ->
+      Enum.flat_map(columns, fn %Column{} = col ->
         case col.name do
           %Regex{} = regex ->
             all_keys
             |> Enum.filter(fn key -> is_binary(key) and Regex.match?(regex, key) end)
-            |> Enum.map(fn key -> %Column{col | name: key} end)
+            |> Enum.map(fn key -> %Column{} = %{col | name: key} end)
 
           name when is_binary(name) ->
             [col]
@@ -102,12 +118,41 @@ defmodule Scrutinex.Validator do
     end
   end
 
-  defp validate_row(row, row_idx, columns, schema, col_names_set, required_col_names) do
+  defp check_required_regex(schema_columns, resolved_columns) do
+    schema_columns
+    |> Enum.filter(fn col -> match?(%Regex{}, col.name) and col.required end)
+    |> Enum.reject(fn col ->
+      Enum.any?(resolved_columns, fn rc -> Regex.match?(col.name, rc.name) end)
+    end)
+    |> Enum.map(fn col ->
+      source = Regex.source(col.name)
+
+      %Error{
+        row: nil,
+        column: source,
+        check: :required_columns,
+        message: "no columns matched pattern '%{pattern}'",
+        metadata: %{pattern: source},
+        value: nil,
+        severity: :error
+      }
+    end)
+  end
+
+  defp validate_row(
+         row,
+         row_idx,
+         columns,
+         schema,
+         col_names_set,
+         required_col_names,
+         suggestion_map
+       ) do
     presence_errors = check_presence(row, row_idx, required_col_names)
 
     strict_errors =
       if schema.strict do
-        check_strict(row, row_idx, col_names_set)
+        check_strict(row, row_idx, col_names_set, suggestion_map)
       else
         []
       end
@@ -131,31 +176,71 @@ defmodule Scrutinex.Validator do
         check: :required,
         message: "is required",
         metadata: %{column: name},
-        value: nil
+        value: nil,
+        severity: :error
       }
     end
   end
 
-  defp check_strict(row, row_idx, declared_set) do
+  defp check_strict(row, row_idx, declared_set, suggestion_map) do
     for key <- Map.keys(row), not MapSet.member?(declared_set, key) do
-      %Error{
-        row: row_idx,
-        column: key,
-        check: :unexpected_column,
-        message: "unexpected column",
-        metadata: %{column: key},
-        value: nil
-      }
+      suggestion = Map.get(suggestion_map, key)
+      unexpected_column_error(row_idx, key, suggestion)
     end
   end
+
+  defp unexpected_column_error(row_idx, key, nil) do
+    %Error{
+      row: row_idx,
+      column: key,
+      check: :unexpected_column,
+      message: "unexpected column",
+      metadata: %{column: key},
+      value: nil,
+      severity: :error
+    }
+  end
+
+  defp unexpected_column_error(row_idx, key, suggestion) do
+    %Error{
+      row: row_idx,
+      column: key,
+      check: :unexpected_column,
+      message: "unexpected column — did you mean '%{suggestion}'?",
+      metadata: %{column: key, suggestion: suggestion},
+      value: nil,
+      severity: :error
+    }
+  end
+
+  @suggestion_threshold 0.8
+
+  defp build_suggestion_map(data, true, declared_string_names, col_names_set)
+       when declared_string_names != [] do
+    all_data_keys = data |> Enum.flat_map(&Map.keys/1) |> Enum.uniq()
+
+    all_data_keys
+    |> Enum.reject(&MapSet.member?(col_names_set, &1))
+    |> Map.new(fn key ->
+      {best_name, best_score} =
+        declared_string_names
+        |> Enum.map(fn name -> {name, String.jaro_distance(key, name)} end)
+        |> Enum.max_by(&elem(&1, 1))
+
+      suggestion = if best_score >= @suggestion_threshold, do: best_name, else: nil
+      {key, suggestion}
+    end)
+  end
+
+  defp build_suggestion_map(_data, _strict, _declared_string_names, _col_names_set), do: %{}
 
   # raw_value is the original value from the row, used by the :skip branch.
-  # In the with/else, :skip is returned by check_null (before maybe_coerce
+  # In the with/else, :skip is returned by check_empty (before maybe_coerce
   # rebinds value), so the else clause correctly sees the original value.
   defp validate_cell(row, col, row_idx, errors) do
     raw_value = Map.get(row, col.name)
 
-    with :ok <- check_null(raw_value, col, row_idx),
+    with :ok <- check_empty(raw_value, col, row_idx),
          {:ok, value} <- maybe_coerce(raw_value, col, row_idx),
          :ok <- maybe_type_check(value, col, row_idx),
          :ok <- run_checks(value, col, row_idx) do
@@ -167,6 +252,9 @@ defmodule Scrutinex.Validator do
     else
       :skip ->
         {errors, row}
+
+      {:warn, warning_error} ->
+        {[warning_error | errors], Map.put(row, col.name, nil)}
 
       {:error, error, coerced_value} ->
         if coerced_value === raw_value do
@@ -190,7 +278,8 @@ defmodule Scrutinex.Validator do
             check: :coercion,
             message: msg,
             metadata: %{type: col.type},
-            value: value
+            value: value,
+            severity: col.severity
           }
 
           {:error, error, value}
@@ -200,23 +289,39 @@ defmodule Scrutinex.Validator do
     end
   end
 
-  defp check_null(value, col, row_idx) do
+  defp check_empty(value, col, row_idx) do
     is_empty = is_nil(value) or value == ""
 
     if is_empty do
-      if col.nullable do
-        :skip
-      else
-        error = %Error{
-          row: row_idx,
-          column: col.name,
-          check: :not_null,
-          message: "must not be empty",
-          metadata: %{column: col.name},
-          value: value
-        }
+      case col.on_empty do
+        :ignore ->
+          :skip
 
-        {:error, error, value}
+        :error ->
+          error = %Error{
+            row: row_idx,
+            column: col.name,
+            check: :not_null,
+            message: "must not be empty",
+            metadata: %{column: col.name},
+            value: value,
+            severity: col.severity
+          }
+
+          {:error, error, value}
+
+        :warn ->
+          error = %Error{
+            row: row_idx,
+            column: col.name,
+            check: :empty_value,
+            message: "value is empty",
+            metadata: %{column: col.name},
+            value: value,
+            severity: :warning
+          }
+
+          {:warn, error}
       end
     else
       :ok
@@ -238,7 +343,8 @@ defmodule Scrutinex.Validator do
             check: :type,
             message: msg,
             metadata: %{type: col.type},
-            value: value
+            value: value,
+            severity: col.severity
           }
 
           {:error, error, value}
@@ -256,13 +362,16 @@ defmodule Scrutinex.Validator do
             {:cont, :ok}
 
           {:error, message, metadata} ->
+            severity = Map.get(col.check_severities, check_type, col.severity)
+
             error = %Error{
               row: row_idx,
               column: col.name,
               check: check_type,
               message: message,
               metadata: metadata,
-              value: value
+              value: value,
+              severity: severity
             }
 
             {:halt, {:error, error, value}}
@@ -292,37 +401,43 @@ defmodule Scrutinex.Validator do
   end
 
   defp run_cross_column_checks(row, row_idx, checks, acc) do
-    Enum.reduce(checks, acc, fn %Check{name: name, message: message, function: func}, acc ->
-      try do
-        if func.(row) do
-          acc
-        else
-          [
-            %Error{
-              row: row_idx,
-              column: nil,
-              check: name,
-              message: message,
-              metadata: %{},
-              value: nil
-            }
-            | acc
-          ]
+    Enum.reduce(
+      checks,
+      acc,
+      fn %Check{name: name, message: message, severity: severity, function: func}, acc ->
+        try do
+          if func.(row) do
+            acc
+          else
+            [
+              %Error{
+                row: row_idx,
+                column: nil,
+                check: name,
+                message: message,
+                metadata: %{},
+                value: nil,
+                severity: severity
+              }
+              | acc
+            ]
+          end
+        rescue
+          e ->
+            [
+              %Error{
+                row: row_idx,
+                column: nil,
+                check: name,
+                message: "cross-column check raised: #{Exception.message(e)}",
+                metadata: %{kind: :exception},
+                value: nil,
+                severity: severity
+              }
+              | acc
+            ]
         end
-      rescue
-        e ->
-          [
-            %Error{
-              row: row_idx,
-              column: nil,
-              check: name,
-              message: "cross-column check raised: #{Exception.message(e)}",
-              metadata: %{kind: :exception},
-              value: nil
-            }
-            | acc
-          ]
       end
-    end)
+    )
   end
 end

@@ -3,7 +3,8 @@ defmodule Scrutinex.Result do
   Validation result, inspired by Ecto changesets.
 
   Contains the validated (and possibly coerced) data alongside any errors.
-  `valid?` is `true` only when `errors` is empty.
+  `valid?` is `true` when there are no `:error`-severity errors (warnings alone
+  do not cause `valid?` to be `false`).
   """
 
   alias Scrutinex.Error
@@ -30,9 +31,11 @@ defmodule Scrutinex.Result do
       Scrutinex.Result.errors_for(result, check: :number)
       #=> [%Scrutinex.Error{check: :number, ...}]
   """
-  @spec errors_for(t(), String.t() | [{:row, non_neg_integer()} | {:check, atom()}]) :: [
-          Error.t()
-        ]
+  @spec errors_for(
+          t(),
+          String.t()
+          | [{:row, non_neg_integer()} | {:check, atom()} | {:severity, :error | :warning}]
+        ) :: [Error.t()]
   def errors_for(result, filter)
 
   def errors_for(%__MODULE__{errors: errors}, column) when is_binary(column) do
@@ -45,6 +48,37 @@ defmodule Scrutinex.Result do
 
   def errors_for(%__MODULE__{errors: errors}, check: check) when is_atom(check) do
     Enum.filter(errors, &(&1.check == check))
+  end
+
+  def errors_for(%__MODULE__{errors: errors}, severity: severity)
+      when severity in [:error, :warning] do
+    Enum.filter(errors, &(&1.severity == severity))
+  end
+
+  @doc """
+  Returns only errors with severity `:warning`.
+
+  ## Examples
+
+      Scrutinex.Result.warnings(result)
+      #=> [%Scrutinex.Error{severity: :warning, ...}]
+  """
+  @spec warnings(t()) :: [Error.t()]
+  def warnings(%__MODULE__{errors: errors}) do
+    Enum.filter(errors, &(&1.severity == :warning))
+  end
+
+  @doc """
+  Returns only errors with severity `:error` (excludes warnings).
+
+  ## Examples
+
+      Scrutinex.Result.errors_only(result)
+      #=> [%Scrutinex.Error{severity: :error, ...}]
+  """
+  @spec errors_only(t()) :: [Error.t()]
+  def errors_only(%__MODULE__{errors: errors}) do
+    Enum.filter(errors, &(&1.severity == :error))
   end
 
   @doc """
