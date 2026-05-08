@@ -72,6 +72,38 @@ defmodule Scrutinex.Schema do
   end
 
   defmacro column(name, type, opts \\ []) do
+    raw_checks = Keyword.get(opts, :checks, [])
+    column_severity = Keyword.get(opts, :severity, :error)
+
+    # Extract per-check severity overrides at compile time.
+    # A check entry like `format: {~r/@/, severity: :warning}` is a 2-tuple
+    # where the second element is a keyword list containing :severity.
+    # We separate the severity from the check args and store them in check_severities.
+    {stripped_checks, check_severities} =
+      Enum.reduce(raw_checks, {[], %{}}, fn
+        {check_type, {actual_args, per_check_opts}}, {checks_acc, sev_acc}
+        when is_list(per_check_opts) ->
+          case Keyword.pop(per_check_opts, :severity) do
+            {nil, _} ->
+              {[{check_type, {actual_args, per_check_opts}} | checks_acc], sev_acc}
+
+            {sev, remaining_opts} ->
+              stripped_args =
+                if remaining_opts == [] do
+                  actual_args
+                else
+                  {actual_args, remaining_opts}
+                end
+
+              {[{check_type, stripped_args} | checks_acc], Map.put(sev_acc, check_type, sev)}
+          end
+
+        entry, {checks_acc, sev_acc} ->
+          {[entry | checks_acc], sev_acc}
+      end)
+
+    stripped_checks = Enum.reverse(stripped_checks)
+
     quote do
       @scrutinex_columns %Column{
         name: unquote(name),
@@ -79,16 +111,20 @@ defmodule Scrutinex.Schema do
         required: unquote(Keyword.get(opts, :required, true)),
         coerce: unquote(Keyword.get(opts, :coerce, false)),
         nullable: unquote(Keyword.get(opts, :nullable, false)),
-        checks: unquote(Keyword.get(opts, :checks, []))
+        checks: unquote(stripped_checks),
+        severity: unquote(column_severity),
+        check_severities: unquote(Macro.escape(check_severities))
       }
     end
   end
 
   defmacro check(name, opts \\ [], do: block) do
     message = Keyword.get(opts, :message, "check failed")
+    severity = Keyword.get(opts, :severity, :error)
 
     quote do
-      @scrutinex_checks {unquote(name), unquote(message), unquote(Macro.escape(block))}
+      @scrutinex_checks {unquote(name), unquote(message), unquote(severity),
+                         unquote(Macro.escape(block))}
     end
   end
 
@@ -119,11 +155,12 @@ defmodule Scrutinex.Schema do
     end
 
     checks =
-      Enum.map(checks_raw, fn {name, message, func_ast} ->
+      Enum.map(checks_raw, fn {name, message, severity, func_ast} ->
         quote do
           %Check{
             name: unquote(name),
             message: unquote(message),
+            severity: unquote(severity),
             function: unquote(func_ast)
           }
         end

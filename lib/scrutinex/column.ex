@@ -18,9 +18,20 @@ defmodule Scrutinex.Column do
           required: boolean(),
           coerce: boolean(),
           nullable: boolean(),
-          checks: keyword()
+          checks: keyword(),
+          severity: :error | :warning,
+          check_severities: map()
         }
 
   @enforce_keys [:name, :type]
-  defstruct [:name, :type, required: true, coerce: false, nullable: false, checks: []]
+  defstruct [
+    :name,
+    :type,
+    required: true,
+    coerce: false,
+    nullable: false,
+    checks: [],
+    severity: :error,
+    check_severities: %{}
+  ]
 end

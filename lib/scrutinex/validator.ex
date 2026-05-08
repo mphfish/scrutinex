@@ -55,7 +55,7 @@ defmodule Scrutinex.Validator do
     all_errors = errors ++ cross_errors
 
     %Result{
-      valid?: all_errors == [],
+      valid?: not Enum.any?(all_errors, &(&1.severity == :error)),
       data: coerced_rows,
       errors: all_errors
     }
@@ -71,7 +71,8 @@ defmodule Scrutinex.Validator do
         check: :internal_error,
         message: "row validation failed: #{Exception.message(e)}",
         metadata: %{kind: :exception},
-        value: nil
+        value: nil,
+        severity: :error
       }
 
       {[error], row}
@@ -91,7 +92,7 @@ defmodule Scrutinex.Validator do
           %Regex{} = regex ->
             all_keys
             |> Enum.filter(fn key -> is_binary(key) and Regex.match?(regex, key) end)
-            |> Enum.map(fn key -> %Column{col | name: key} end)
+            |> Enum.map(fn key -> %Column{} = %{col | name: key} end)
 
           name when is_binary(name) ->
             [col]
@@ -131,7 +132,8 @@ defmodule Scrutinex.Validator do
         check: :required,
         message: "is required",
         metadata: %{column: name},
-        value: nil
+        value: nil,
+        severity: :error
       }
     end
   end
@@ -144,7 +146,8 @@ defmodule Scrutinex.Validator do
         check: :unexpected_column,
         message: "unexpected column",
         metadata: %{column: key},
-        value: nil
+        value: nil,
+        severity: :error
       }
     end
   end
@@ -190,7 +193,8 @@ defmodule Scrutinex.Validator do
             check: :coercion,
             message: msg,
             metadata: %{type: col.type},
-            value: value
+            value: value,
+            severity: col.severity
           }
 
           {:error, error, value}
@@ -213,7 +217,8 @@ defmodule Scrutinex.Validator do
           check: :not_null,
           message: "must not be empty",
           metadata: %{column: col.name},
-          value: value
+          value: value,
+          severity: col.severity
         }
 
         {:error, error, value}
@@ -238,7 +243,8 @@ defmodule Scrutinex.Validator do
             check: :type,
             message: msg,
             metadata: %{type: col.type},
-            value: value
+            value: value,
+            severity: col.severity
           }
 
           {:error, error, value}
@@ -256,13 +262,16 @@ defmodule Scrutinex.Validator do
             {:cont, :ok}
 
           {:error, message, metadata} ->
+            severity = Map.get(col.check_severities, check_type, col.severity)
+
             error = %Error{
               row: row_idx,
               column: col.name,
               check: check_type,
               message: message,
               metadata: metadata,
-              value: value
+              value: value,
+              severity: severity
             }
 
             {:halt, {:error, error, value}}
@@ -292,37 +301,43 @@ defmodule Scrutinex.Validator do
   end
 
   defp run_cross_column_checks(row, row_idx, checks, acc) do
-    Enum.reduce(checks, acc, fn %Check{name: name, message: message, function: func}, acc ->
-      try do
-        if func.(row) do
-          acc
-        else
-          [
-            %Error{
-              row: row_idx,
-              column: nil,
-              check: name,
-              message: message,
-              metadata: %{},
-              value: nil
-            }
-            | acc
-          ]
+    Enum.reduce(
+      checks,
+      acc,
+      fn %Check{name: name, message: message, severity: severity, function: func}, acc ->
+        try do
+          if func.(row) do
+            acc
+          else
+            [
+              %Error{
+                row: row_idx,
+                column: nil,
+                check: name,
+                message: message,
+                metadata: %{},
+                value: nil,
+                severity: severity
+              }
+              | acc
+            ]
+          end
+        rescue
+          e ->
+            [
+              %Error{
+                row: row_idx,
+                column: nil,
+                check: name,
+                message: "cross-column check raised: #{Exception.message(e)}",
+                metadata: %{kind: :exception},
+                value: nil,
+                severity: severity
+              }
+              | acc
+            ]
         end
-      rescue
-        e ->
-          [
-            %Error{
-              row: row_idx,
-              column: nil,
-              check: name,
-              message: "cross-column check raised: #{Exception.message(e)}",
-              metadata: %{kind: :exception},
-              value: nil
-            }
-            | acc
-          ]
       end
-    end)
+    )
   end
 end

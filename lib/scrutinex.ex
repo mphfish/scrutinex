@@ -105,8 +105,10 @@ defmodule Scrutinex do
     if result.valid? do
       result.data
     else
+      error_count = Enum.count(result.errors, &(&1.severity == :error))
+
       raise Scrutinex.ValidationError,
-        message: "validation failed with #{length(result.errors)} error(s)",
+        message: "validation failed with #{error_count} error(s)",
         result: result
     end
   end

@@ -9,9 +9,10 @@ defmodule Scrutinex.Check do
   @type t :: %__MODULE__{
           name: atom(),
           message: String.t(),
-          function: (map() -> boolean())
+          function: (map() -> boolean()),
+          severity: :error | :warning
         }
 
   @enforce_keys [:name, :function]
-  defstruct [:name, :function, message: "check failed"]
+  defstruct [:name, :function, message: "check failed", severity: :error]
 end

@@ -19,11 +19,12 @@ defmodule Scrutinex.Error do
           check: atom(),
           message: String.t(),
           metadata: map(),
-          value: term()
+          value: term(),
+          severity: :error | :warning
         }
 
   @enforce_keys [:row, :check, :message]
-  defstruct [:row, :column, :check, :message, :value, metadata: %{}]
+  defstruct [:row, :column, :check, :message, :value, metadata: %{}, severity: :error]
 
   @doc """
   Interpolates metadata values into the message template.
