@@ -1,7 +1,7 @@
 defmodule Scrutinex.Validator do
   @moduledoc false
 
-  alias Scrutinex.{Column, Check, Coercion, Error, Result}
+  alias Scrutinex.{Column, Check, Coercion, Error, Result, Index}
   alias Scrutinex.Checks.{Number, Inclusion, Exclusion, Format, Length, Custom}
 
   @doc """
@@ -28,10 +28,10 @@ defmodule Scrutinex.Validator do
     suggestion_map =
       build_suggestion_map(data, schema.strict, declared_string_names, col_names_set)
 
-    {coerced_rows, errors, _error_count} =
+    {coerced_rows, errors_rev} =
       data
       |> Enum.with_index()
-      |> Enum.reduce_while({[], [], 0}, fn {row, row_idx}, {rows_acc, errors_acc, err_count} ->
+      |> Enum.map_reduce([], fn {row, row_idx}, errors_acc ->
         {row_errors, coerced_row} =
           safe_validate_row(
             row,
@@ -43,29 +43,34 @@ defmodule Scrutinex.Validator do
             suggestion_map
           )
 
-        new_count = err_count + length(row_errors)
-        acc = {[coerced_row | rows_acc], [row_errors | errors_acc], new_count}
-
-        if max_errors != :infinity and new_count >= max_errors do
-          {:halt, acc}
-        else
-          {:cont, acc}
-        end
+        {coerced_row, [row_errors | errors_acc]}
       end)
 
-    errors = errors |> Enum.reverse() |> List.flatten()
-    coerced_rows = Enum.reverse(coerced_rows)
+    errors = errors_rev |> Enum.reverse() |> List.flatten()
 
     cross_errors = run_all_cross_checks(coerced_rows, schema.checks)
+    invalid_cells = invalid_index_cells(errors)
+    unique_errors = run_unique_indexes(coerced_rows, schema.indexes, invalid_cells)
 
     regex_errors = check_required_regex(schema.columns, resolved_columns)
-    all_errors = regex_errors ++ errors ++ cross_errors
+    all_errors = regex_errors ++ errors ++ cross_errors ++ unique_errors
 
     %Result{
       valid?: not Enum.any?(all_errors, &(&1.severity == :error)),
       data: coerced_rows,
-      errors: all_errors
+      errors: limit_errors(all_errors, max_errors)
     }
+  end
+
+  # max_errors caps only the returned error list; validation always runs to
+  # completion, so valid? above reflects the full dataset. When capping, keep
+  # :error-severity entries ahead of :warning entries (each in natural order) so
+  # a valid?: false verdict is always accompanied by at least one :error here.
+  defp limit_errors(entries, :infinity), do: entries
+
+  defp limit_errors(entries, max_errors) do
+    {errors, warnings} = Enum.split_with(entries, &(&1.severity == :error))
+    Enum.take(errors ++ warnings, max_errors)
   end
 
   defp safe_validate_row(
@@ -439,5 +444,76 @@ defmodule Scrutinex.Validator do
         end
       end
     )
+  end
+
+  # Set of {row_index, column} pairs whose value failed coercion or
+  # type-checking. Those cells keep their raw (un-coerced) value, so a row is
+  # excluded from any index that contains such a column — mirroring the
+  # SQL-null skip in build_key/2. A row is only compared on values that
+  # successfully coerced to their declared type.
+  defp invalid_index_cells(errors) do
+    for %Error{check: check, row: row, column: column} <- errors,
+        check in [:coercion, :type],
+        not is_nil(column),
+        into: MapSet.new(),
+        do: {row, column}
+  end
+
+  defp run_unique_indexes(rows, indexes, invalid_cells) do
+    indexed_rows = Enum.with_index(rows)
+    Enum.flat_map(indexes, &run_index(&1, indexed_rows, invalid_cells))
+  end
+
+  defp run_index(%Index{} = index, indexed_rows, invalid_cells) do
+    {errors_rev, _seen} =
+      Enum.reduce(indexed_rows, {[], %{}}, &track_row(&1, &2, index, invalid_cells))
+
+    Enum.reverse(errors_rev)
+  end
+
+  # A non-map row (malformed input) already carries an :internal_error from the
+  # per-row pass; skip it here rather than letting build_key/2 raise BadMapError.
+  defp track_row({row, row_idx}, acc, %Index{} = index, invalid_cells) when is_map(row) do
+    if Enum.any?(index.columns, &MapSet.member?(invalid_cells, {row_idx, &1})) do
+      acc
+    else
+      case build_key(row, index.columns) do
+        :skip -> acc
+        {:ok, key} -> record_or_flag(key, row_idx, index, acc)
+      end
+    end
+  end
+
+  defp track_row({_row, _row_idx}, acc, %Index{}, _invalid_cells), do: acc
+
+  defp record_or_flag(key, row_idx, %Index{} = index, {errors, seen}) do
+    case Map.fetch(seen, key) do
+      {:ok, first_idx} -> {[unique_error(index, row_idx, first_idx, key) | errors], seen}
+      :error -> {errors, Map.put(seen, key, row_idx)}
+    end
+  end
+
+  defp build_key(row, columns) do
+    Enum.reduce_while(columns, {:ok, %{}}, fn col, {:ok, acc} ->
+      value = Map.get(row, col)
+
+      if is_nil(value) or value == "" do
+        {:halt, :skip}
+      else
+        {:cont, {:ok, Map.put(acc, col, value)}}
+      end
+    end)
+  end
+
+  defp unique_error(%Index{} = index, row_idx, first_idx, values) do
+    %Error{
+      row: row_idx,
+      column: nil,
+      check: index.name,
+      message: index.message,
+      metadata: %{columns: index.columns, first_row: first_idx, values: values},
+      value: nil,
+      severity: index.severity
+    }
   end
 end

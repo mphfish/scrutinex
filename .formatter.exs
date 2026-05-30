@@ -4,7 +4,9 @@ locals_without_parens = [
   column: 2,
   column: 3,
   check: 2,
-  check: 3
+  check: 3,
+  unique: 1,
+  unique: 2
 ]
 
 [

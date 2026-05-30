@@ -38,7 +38,21 @@ defmodule Scrutinex.Error do
   @spec format_message(t()) :: String.t()
   def format_message(%__MODULE__{message: message, metadata: metadata}) do
     Enum.reduce(metadata, message, fn {key, val}, msg ->
-      String.replace(msg, "%{#{key}}", to_string(val))
+      placeholder = "%{#{key}}"
+
+      if String.contains?(msg, placeholder) do
+        String.replace(msg, placeholder, stringify(val))
+      else
+        msg
+      end
     end)
+  end
+
+  # Render a metadata value for interpolation. Values implementing String.Chars
+  # (strings, numbers, atoms, lists) use to_string/1; structured values such as
+  # the map of duplicated values in a unique-index error fall back to inspect/1
+  # so interpolation of a present placeholder never raises.
+  defp stringify(val) do
+    if String.Chars.impl_for(val), do: to_string(val), else: inspect(val)
   end
 end

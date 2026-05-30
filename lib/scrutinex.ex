@@ -37,8 +37,13 @@ defmodule Scrutinex do
 
   ## Options
 
-    * `:max_errors` - stop validation after accumulating this many errors.
-      Useful for quick validity checks or limiting output on large datasets.
+    * `:max_errors` - cap the number of entries in the returned `:errors` list
+      (a non-negative integer). Validation always runs over the full dataset, so
+      `:valid?` always reflects the complete result (including cross-row checks
+      such as unique indexes). When the list is capped, `:error`-severity entries
+      are kept ahead of warnings, so a non-empty `:errors` list always leads with
+      the `:error`(s) behind a `:valid?` of `false`. Limits output, not work
+      performed.
 
   ## Examples
 
@@ -46,7 +51,7 @@ defmodule Scrutinex do
       result.valid?   # => true or false
       result.errors   # => [%Scrutinex.Error{}, ...]
 
-      # Stop after 10 errors
+      # Return at most 10 errors (validation still covers every row)
       result = Scrutinex.validate(data, MyApp.UserSchema, max_errors: 10)
   """
   @spec validate(list(map()), module(), keyword()) :: Result.t()

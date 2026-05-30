@@ -28,6 +28,8 @@ defmodule OrderSchema do
   check :amount_valid do
     fn row -> row["amount"] > 0 or row["status"] == "pending" end
   end
+
+  unique ["id"]
 end
 
 result = Scrutinex.validate(data, OrderSchema)
@@ -43,6 +45,7 @@ result.errors  #=> []
 - **Built-in checks** — number ranges, inclusion/exclusion, format, length, custom functions
 - **Regex columns** — `column ~r/sales_.*/, :float` matches all columns by pattern
 - **Cross-column checks** — validate relationships between columns
+- **Unique indexes** — `unique ["region", "sku"]` rejects repeated value tuples across rows
 - **Strict mode** — reject undeclared columns
 - **Zero runtime dependencies**
 

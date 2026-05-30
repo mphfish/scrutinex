@@ -264,23 +264,25 @@ defmodule Scrutinex.RemediationTest do
   # --- T3-03: max_errors ---
 
   describe "T3-03: max_errors option" do
-    test "stops validation after max_errors reached" do
+    test "caps the returned errors at max_errors" do
       # Every row will fail with exactly 1 error (missing "name" column)
       data = for i <- 1..100, do: %{"age" => i}
 
       result = Scrutinex.validate(data, SimpleSchema, max_errors: 5)
       refute result.valid?
-      # Should stop processing rows after accumulating >= 5 errors
-      # Each row produces exactly 1 :required error, so we get exactly 5
+      # All 100 rows are validated (data length proves it); only the first 5
+      # errors are returned because max_errors caps output, not work.
       assert length(result.errors) == 5
+      assert length(result.data) == 100
     end
 
-    test "max_errors: 1 stops after first error" do
+    test "max_errors: 1 returns exactly one error" do
       data = [%{"age" => 1}, %{"age" => 2}, %{"age" => 3}]
       result = Scrutinex.validate(data, SimpleSchema, max_errors: 1)
       refute result.valid?
-      # At most the errors from the first row or two
-      assert length(result.errors) <= 3
+      # Exactly one error returned, though all 3 rows are still validated.
+      assert length(result.errors) == 1
+      assert length(result.data) == 3
     end
 
     test "no max_errors processes all rows" do
@@ -289,6 +291,85 @@ defmodule Scrutinex.RemediationTest do
       refute result.valid?
       # Each row missing "name" = 10 errors
       assert length(result.errors) == 10
+    end
+  end
+
+  defmodule MaxErrorsMixedSchema do
+    use Scrutinex.Schema
+    # email warns (bad format); name is default-required and errors when missing
+    column("email", :string, severity: :warning, checks: [format: ~r/@/])
+    column("name", :string)
+  end
+
+  defmodule MaxErrorsUniqueSchema do
+    use Scrutinex.Schema
+    column("email", :string, severity: :warning, checks: [format: ~r/@/])
+    column("id", :string)
+    unique("id")
+  end
+
+  describe "max_errors limits output, not validation" do
+    test "validation runs to completion so valid? reflects rows beyond the cap" do
+      # rows 0,1 each emit only a :warning (bad email); row 2 also has a real :error
+      # (missing required name). Under the OLD early-halt behavior, max_errors: 2
+      # was reached by the two warnings before row 2 was ever processed, so the
+      # :error was missed and valid? was wrongly true.
+      data = [
+        %{"name" => "Alice", "email" => "bad"},
+        %{"name" => "Bob", "email" => "bad"},
+        %{"email" => "bad"}
+      ]
+
+      result = Scrutinex.validate(data, MaxErrorsMixedSchema, max_errors: 2)
+
+      refute result.valid?
+      assert length(result.data) == 3
+    end
+
+    test "data contains every row even when errors are capped" do
+      # Each row is missing required name → 1 error per row. max_errors: 2 caps
+      # the returned errors, but all 10 rows are still validated and returned.
+      data = for i <- 1..10, do: %{"age" => i}
+
+      result = Scrutinex.validate(data, SimpleSchema, max_errors: 2)
+
+      assert length(result.errors) == 2
+      assert length(result.data) == 10
+      refute result.valid?
+    end
+
+    test "a duplicate beyond the cap is still detected (unique index)" do
+      # rows 0,1 warn (bad email); row 2 duplicates row 0's id. Under the old
+      # early-halt the two warnings hit the cap before row 2 was processed, so
+      # the duplicate was invisible and valid? was wrongly true. Now validation
+      # runs to completion, so the unique-index violation is detected.
+      data = [
+        %{"id" => "A", "email" => "bad"},
+        %{"id" => "B", "email" => "bad"},
+        %{"id" => "A", "email" => "ok@x"}
+      ]
+
+      result = Scrutinex.validate(data, MaxErrorsUniqueSchema, max_errors: 2)
+
+      refute result.valid?
+      assert length(result.data) == 3
+    end
+
+    test "a capped errors list surfaces the :error ahead of warnings" do
+      # rows 0,1 emit only warnings (bad email); row 2 carries the invalidating
+      # :error (missing required name). Even at max_errors: 1 the returned error
+      # must be that :error, never a leading warning, so valid?: false is always
+      # explained by the returned errors.
+      data = [
+        %{"name" => "Alice", "email" => "bad"},
+        %{"name" => "Bob", "email" => "bad"},
+        %{"email" => "bad"}
+      ]
+
+      result = Scrutinex.validate(data, MaxErrorsMixedSchema, max_errors: 1)
+
+      refute result.valid?
+      assert [%Scrutinex.Error{severity: :error}] = result.errors
     end
   end
 

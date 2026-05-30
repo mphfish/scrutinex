@@ -192,22 +192,26 @@ defmodule Scrutinex.SeverityTest do
 
   # --- AC8: max_errors counts ALL errors regardless of severity ---
 
-  describe "AC8: max_errors counts all severities" do
-    test "max_errors halts after N total errors including warnings" do
+  describe "AC8: max_errors caps the returned errors (all severities)" do
+    test "max_errors caps the returned list, warnings included" do
       # WarnOnlySchema has only a :warning column, so all errors are warnings.
-      # With max_errors: 2 and each row producing 1 warning, we stop after 2 rows.
+      # All 10 rows are validated; max_errors: 2 only caps the returned list,
+      # so we get the first 2 warnings back (warnings count toward the cap).
       data = Enum.map(1..10, fn _ -> %{"email" => "bad-email"} end)
       result = Scrutinex.validate(data, WarnOnlySchema, max_errors: 2)
 
-      # max_errors counts warnings too — stopped after 2 warnings
+      # max_errors counts warnings too — only 2 returned
       assert length(result.errors) == 2
       assert Enum.all?(result.errors, &(&1.severity == :warning))
+      assert length(result.data) == 10
     end
 
-    test "max_errors with mixed severity halts on total count" do
+    test "max_errors caps a mixed-severity result" do
       # MixedSeveritySchema: email = :warning, name = :error.
       # Each row produces 1 warning (email) + 1 error (name).
-      # max_errors: 2 → after row 0 count=2 >= 2, halt → only row 0's errors
+      # All 3 rows are validated; max_errors: 2 caps output. With severity
+      # priority, the two returned are the two :error-severity name entries,
+      # kept ahead of the email warnings — nothing is halted.
       data = [
         %{"email" => "bad", "name" => ""},
         %{"email" => "bad", "name" => ""},
@@ -216,8 +220,10 @@ defmodule Scrutinex.SeverityTest do
 
       result = Scrutinex.validate(data, MixedSeveritySchema, max_errors: 2)
 
-      # Exactly 2 errors from row 0 (1 warning + 1 error)
+      # Only the first 2 errors are returned, both :error-severity (name).
       assert length(result.errors) == 2
+      assert Enum.all?(result.errors, &(&1.severity == :error))
+      assert length(result.data) == 3
     end
   end
 
